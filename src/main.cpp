@@ -49,6 +49,125 @@ R"(Naval Fate.
 )";
 
 
+auto read_byte(int device, std::uint8_t reg) -> std::uint8_t {
+  const auto res = i2c_smbus_read_byte_data(device, reg);
+  if (res < 0) {
+    spdlog::error("Error reading byte of data from {} (err result: {})", reg, res);
+  }
+  return static_cast<std::uint8_t>(res);
+}
+
+auto write_byte(int device, std::uint8_t reg, std::uint8_t value) {
+  const auto res = i2c_smbus_write_byte_data(device, reg, value);
+  if (res < 0) {
+    spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
+  }
+}
+
+auto send_command(int device, std::uint8_t value) {
+  const auto res = i2c_smbus_write_byte_data(device, 0, value);
+  if (res < 0) {
+    spdlog::error("Error writing command data '{}' (err result: {})", value, res);
+  }
+}
+
+
+constexpr auto SSD1306_I2C_ADDRESS = 0x3C;    // 011110+SA0+RW - 0x3C or 0x3D
+constexpr auto SSD1306_SETCONTRAST = 0x81;
+constexpr auto SSD1306_DISPLAYALLON_RESUME = 0xA4;
+constexpr auto SSD1306_DISPLAYALLON = 0xA5;
+constexpr auto SSD1306_NORMALDISPLAY = 0xA6;
+constexpr auto SSD1306_INVERTDISPLAY = 0xA7;
+constexpr auto SSD1306_DISPLAYOFF = 0xAE;
+constexpr auto SSD1306_DISPLAYON = 0xAF;
+constexpr auto SSD1306_SETDISPLAYOFFSET = 0xD3;
+constexpr auto SSD1306_SETCOMPINS = 0xDA;
+constexpr auto SSD1306_SETVCOMDETECT = 0xDB;
+constexpr auto SSD1306_SETDISPLAYCLOCKDIV = 0xD5;
+constexpr auto SSD1306_SETPRECHARGE = 0xD9;
+constexpr auto SSD1306_SETMULTIPLEX = 0xA8;
+constexpr auto SSD1306_SETLOWCOLUMN = 0x00;
+constexpr auto SSD1306_SETHIGHCOLUMN = 0x10;
+constexpr auto SSD1306_SETSTARTLINE = 0x40;
+constexpr auto SSD1306_MEMORYMODE = 0x20;
+constexpr auto SSD1306_COLUMNADDR = 0x21;
+constexpr auto SSD1306_PAGEADDR = 0x22;
+constexpr auto SSD1306_COMSCANINC = 0xC0;
+constexpr auto SSD1306_COMSCANDEC = 0xC8;
+constexpr auto SSD1306_SEGREMAP = 0xA0;
+constexpr auto SSD1306_CHARGEPUMP = 0x8D;
+constexpr auto SSD1306_EXTERNALVCC = 0x1;
+constexpr auto SSD1306_SWITCHCAPVCC = 0x2;
+//  Scrolling constants;
+constexpr auto SSD1306_ACTIVATE_SCROLL = 0x2F;
+constexpr auto SSD1306_DEACTIVATE_SCROLL = 0x2E;
+constexpr auto SSD1306_SET_VERTICAL_SCROLL_AREA = 0xA3;
+constexpr auto SSD1306_RIGHT_HORIZONTAL_SCROLL = 0x26;
+constexpr auto SSD1306_LEFT_HORIZONTAL_SCROLL = 0x27;
+constexpr auto SSD1306_VERTICAL_AND_RIGHT_HORIZONTAL_SCROLL = 0x29;
+constexpr auto SSD1306_VERTICAL_AND_LEFT_HORIZONTAL_SCROLL = 0x2A;
+
+void init_ssd1306(int device)
+{
+  // 128x32 pixel specific initialization.
+  send_command(device, SSD1306_DISPLAYOFF);                    // 0xAE
+  send_command(device, SSD1306_SETDISPLAYCLOCKDIV);            // 0xD5
+  send_command(device, 0x80);                                  // the suggested ratio 0x80
+  send_command(device, SSD1306_SETMULTIPLEX);                  // 0xA8
+  send_command(device, 0x1F);
+  send_command(device, SSD1306_SETDISPLAYOFFSET);              // 0xD3
+  send_command(device, 0x0);                                   // no offset
+  send_command(device, SSD1306_SETSTARTLINE | 0x0);            // line //0
+  send_command(device, SSD1306_CHARGEPUMP);                    // 0x8D
+  //if self._vccstate == SSD1306_EXTERNALVCC:
+  //    send_command(device, 0x10);
+  //else:
+  send_command(device, 0x14);
+  send_command(device, SSD1306_MEMORYMODE);                    // 0x20
+  send_command(device, 0x00);                                  // 0x0 act like ks0108
+  send_command(device, SSD1306_SEGREMAP | 0x1);
+  send_command(device, SSD1306_COMSCANDEC);
+  send_command(device, SSD1306_SETCOMPINS);                    // 0xDA
+  send_command(device, 0x02);
+  send_command(device, SSD1306_SETCONTRAST);                   // 0x81
+  send_command(device, 0x8F);
+  send_command(device, SSD1306_SETPRECHARGE);                  // 0xd9
+  //if self._vccstate == SSD1306_EXTERNALVCC:
+  //    send_command(device, 0x22);
+  //else:
+  send_command(device, 0xF1);
+  send_command(device, SSD1306_SETVCOMDETECT);                 // 0xDB
+  send_command(device, 0x40);
+  send_command(device, SSD1306_DISPLAYALLON_RESUME);           // 0xA4
+  send_command(device, SSD1306_NORMALDISPLAY);                 // 0xA6
+  send_command(device, SSD1306_DISPLAYON);                    // 0xAE
+  send_command(device, SSD1306_DISPLAYALLON);                    // 0xAE
+
+
+}
+
+
+int open_i2c_device(const int deviceid)
+{
+  int adapter_nr = 1; /* probably dynamically determined */
+  char i2cname[20];
+
+  snprintf(i2cname, 19, "/dev/i2c-%d", adapter_nr);
+  const auto filehandle = open(i2cname, O_RDWR);
+  if (filehandle < 0) {
+    /* ERROR HANDLING; you can check errno to see what went wrong */
+    spdlog::error("Unable to open i2c device for R/W");
+    exit(1);
+  }
+
+  if (ioctl(filehandle, I2C_SLAVE, deviceid) < 0) {
+    /* ERROR HANDLING; you can check errno to see what went wrong */
+    spdlog::error("Unable to set I2C_SLAVE addr to {}", deviceid);
+    exit(1);
+  }
+
+  return filehandle;
+}
 
 int main(/*int argc, const char **argv*/)
 {
@@ -75,45 +194,14 @@ int main(/*int argc, const char **argv*/)
 
      Next thing, open the device rtc, as follows:
      */
-  int rtc;
-  int adapter_nr = 1; /* probably dynamically determined */
-  char rtcname[20];
-
-  snprintf(rtcname, 19, "/dev/i2c-%d", adapter_nr);
-  rtc = open(rtcname, O_RDWR);
-  if (rtc < 0) {
-    /* ERROR HANDLING; you can check errno to see what went wrong */
-    spdlog::error("Unable to open i2c device for R/W");
-    exit(1);
-  }
-
   constexpr int ds1307_rtc_address = 0x68;
 
-  if (ioctl(rtc, I2C_SLAVE, ds1307_rtc_address) < 0) {
-    /* ERROR HANDLING; you can check errno to see what went wrong */
-    spdlog::error("Unable to set I2C_SLAVE addr to {}", ds1307_rtc_address);
-    exit(1);
-  }
+  auto rtc = open_i2c_device(ds1307_rtc_address);
 
   //  Well, you are all set up now. You can now use SMBus commands or plain
   //    I2C to communicate with your device. SMBus commands are preferred if
   //   the device supports them. Both are illustrated below.
 
-  auto read_byte = [](int device, std::uint8_t reg) -> std::uint8_t {
-    const auto res = i2c_smbus_read_byte_data(device, reg);
-    if (res < 0) {
-      spdlog::error("Error reading byte of data from {} (err result: {})", reg, res);
-    }
-    return static_cast<std::uint8_t>(res);
-  };
-
-  auto write_byte = [](int device, std::uint8_t reg, std::uint8_t value) {
-    const auto res = i2c_smbus_write_byte_data(device, reg, value);
-    if (res < 0) {
-      spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
-    }
-  };
- 
   auto time_field = [](const std::uint8_t input) {
     return (0b1111 & input) + ((input >> 4) & 0b111) * 10;
   };
@@ -129,10 +217,9 @@ int main(/*int argc, const char **argv*/)
 
   fmt::print("{:02}:{:02}:{:02}\n", time_field(hours), time_field(minutes), time_field(seconds));
 
-  write_byte(rtc, 0x10, 42);
 
-
-
+  auto oled = open_i2c_device(0x3c);
+  init_ssd1306(oled);
 
 
 }
