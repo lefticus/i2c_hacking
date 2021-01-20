@@ -21,8 +21,13 @@
 #include <docopt/docopt.h>
 
 #include <linux/i2c-dev.h>
-#include <i2c/smbus.h>
 
+extern "C" {
+#include <i2c/smbus.h>
+}
+
+#include <sys/ioctl.h>
+#include <fcntl.h>
 
 
 static constexpr auto USAGE =
@@ -43,7 +48,9 @@ R"(Naval Fate.
           --drifting    Drifting mine.
 )";
 
-int main(int argc, const char **argv)
+
+
+int main(/*int argc, const char **argv*/)
 {
   /*
      std::map<std::string, docopt::value> args = docopt::docopt(USAGE,
@@ -57,10 +64,7 @@ int main(int argc, const char **argv)
      */
 
   //Use the default logger (stdout, multi-threaded, colored)
-  spdlog::info("Hello, {}!", "World");
-
-  fmt::print("Hello, from {}\n", "{fmt}");
-
+  spdlog::info("Starting i2c Experiments");
 
 
   /*
@@ -69,26 +73,25 @@ int main(int argc, const char **argv)
      Adapter numbers are assigned somewhat dynamically, so you can not
      assume much about them. They can even change from one boot to the next.
 
-     Next thing, open the device file, as follows:
+     Next thing, open the device rtc, as follows:
      */
-  int file;
-  int adapter_nr = 2; /* probably dynamically determined */
-  char filename[20];
+  int rtc;
+  int adapter_nr = 1; /* probably dynamically determined */
+  char rtcname[20];
 
-  snprintf(filename, 19, "/dev/i2c-%d", adapter_nr);
-  file = open(filename, O_RDWR);
-  if (file < 0) {
+  snprintf(rtcname, 19, "/dev/i2c-%d", adapter_nr);
+  rtc = open(rtcname, O_RDWR);
+  if (rtc < 0) {
     /* ERROR HANDLING; you can check errno to see what went wrong */
+    spdlog::error("Unable to open i2c device for R/W");
     exit(1);
   }
 
-  //  When you have opened the device, you must specify with what device
-  //    address you want to communicate:
+  constexpr int ds1307_rtc_address = 0x68;
 
-  int addr = 0x40; /* The I2C address */
-
-  if (ioctl(file, I2C_SLAVE, addr) < 0) {
+  if (ioctl(rtc, I2C_SLAVE, ds1307_rtc_address) < 0) {
     /* ERROR HANDLING; you can check errno to see what went wrong */
+    spdlog::error("Unable to set I2C_SLAVE addr to {}", ds1307_rtc_address);
     exit(1);
   }
 
@@ -96,35 +99,40 @@ int main(int argc, const char **argv)
   //    I2C to communicate with your device. SMBus commands are preferred if
   //   the device supports them. Both are illustrated below.
 
-  __u8 reg = 0x10; /* Device register to access */
-  __s32 res;
-  char buf[10];
+  auto read_byte = [](int device, std::uint8_t reg) -> std::uint8_t {
+    const auto res = i2c_smbus_read_byte_data(device, reg);
+    if (res < 0) {
+      spdlog::error("Error reading byte of data from {} (err result: {})", reg, res);
+    }
+    return static_cast<std::uint8_t>(res);
+  };
 
-  /* Using SMBus commands */
-  res = i2c_smbus_read_word_data(file, reg);
-  if (res < 0) {
-    /* ERROR HANDLING: i2c transaction failed */
-  } else {
-    /* res contains the read word */
-  }
+  auto write_byte = [](int device, std::uint8_t reg, std::uint8_t value) {
+    const auto res = i2c_smbus_write_byte_data(device, reg, value);
+    if (res < 0) {
+      spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
+    }
+  };
+ 
+  auto time_field = [](const std::uint8_t input) {
+    return (0b1111 & input) + ((input >> 4) & 0b111) * 10;
+  };
 
-  /*
-   * Using I2C Write, equivalent of
-   * i2c_smbus_write_word_data(file, reg, 0x6543)
-   */
-  buf[0] = reg;
-  buf[1] = 0x43;
-  buf[2] = 0x65;
-  if (write(file, buf, 3) != 3) {
-    /* ERROR HANDLING: i2c transaction failed */
-  }
+  // force 24 mode, putting in the same hour as was just read.
+  //
+  // let's really hope that we don't do this during a race for hours rolling over
+  //
+  // write_byte(rtc, 0x02, static_cast<std::uint8_t>(0b0011'1111 & read_byte(rtc, 0x02)));
+  const auto seconds = read_byte(rtc, 0x00);
+  const auto minutes = read_byte(rtc, 0x01);
+  const auto hours = 0b111111 & read_byte(rtc, 0x02);
 
-  /* Using I2C Read, equivalent of i2c_smbus_read_byte(file) */
-  if (read(file, buf, 1) != 1) {
-    /* ERROR HANDLING: i2c transaction failed */
-  } else {
-    /* buf[0] contains the read byte */
-  }
+  fmt::print("{:02}:{:02}:{:02}\n", time_field(hours), time_field(minutes), time_field(seconds));
+
+  write_byte(rtc, 0x10, 42);
+
+
+
 
 
 }
