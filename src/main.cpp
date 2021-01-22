@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <iostream>
+#include <array>
 
 #include <spdlog/spdlog.h>
 #include <docopt/docopt.h>
@@ -28,7 +29,8 @@ extern "C" {
 
 #include <sys/ioctl.h>
 #include <fcntl.h>
-
+#include <unistd.h>
+#include <fmt/chrono.h>
 
 static constexpr auto USAGE =
 R"(Naval Fate.
@@ -57,14 +59,24 @@ auto read_byte(int device, std::uint8_t reg) -> std::uint8_t {
   return static_cast<std::uint8_t>(res);
 }
 
-auto write_byte(int device, std::uint8_t reg, std::uint8_t value) {
+auto read_block(int device, std::uint8_t reg) -> std::pair<int, std::array<std::uint8_t, 32>> {
+  std::pair<int, std::array<std::uint8_t, 32>> result;
+  result.first = i2c_smbus_read_block_data(device, reg, result.second.data());
+  if (result.first < 0) {
+    spdlog::error("Error reading block of data from {} (err result: {})", reg, result.first);
+  }
+  return result;
+}
+
+
+void write_byte(int device, std::uint8_t reg, std::uint8_t value) {
   const auto res = i2c_smbus_write_byte_data(device, reg, value);
   if (res < 0) {
     spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
   }
 }
 
-auto send_command(int device, std::uint8_t value) {
+void send_command(int device, std::uint8_t value) {
   const auto res = i2c_smbus_write_byte_data(device, 0, value);
   if (res < 0) {
     spdlog::error("Error writing command data '{}' (err result: {})", value, res);
@@ -147,16 +159,12 @@ void init_ssd1306(int device)
 }
 
 
-int open_i2c_device(const int deviceid)
+int open_i2c_device(const int adapter_nr, const int deviceid)
 {
-  int adapter_nr = 1; /* probably dynamically determined */
-  char i2cname[20];
-
-  snprintf(i2cname, 19, "/dev/i2c-%d", adapter_nr);
-  const auto filehandle = open(i2cname, O_RDWR);
+  const auto filehandle = open(fmt::format("/dev/i2c-{}", adapter_nr).c_str(), O_RDWR);
   if (filehandle < 0) {
     /* ERROR HANDLING; you can check errno to see what went wrong */
-    spdlog::error("Unable to open i2c device for R/W");
+    spdlog::error("Unable to open i2c-{} device for R/W", adapter_nr);
     exit(1);
   }
 
@@ -168,6 +176,148 @@ int open_i2c_device(const int deviceid)
 
   return filehandle;
 }
+
+struct i2c_device
+{
+  int handle{};
+  i2c_device(const int adapter_nr, const int deviceid)
+    : handle(open_i2c_device(adapter_nr, deviceid))
+  {
+  }
+
+  ~i2c_device() {
+    ::close(handle);
+  }
+
+  i2c_device &operator=(const i2c_device &) = delete;
+  i2c_device &operator=(i2c_device &&) = delete;
+  i2c_device(const i2c_device &) = delete;
+  i2c_device(i2c_device &&) = delete;
+
+  auto read_byte(std::uint8_t reg) const -> std::uint8_t {
+    return ::read_byte(handle, reg);
+  }
+
+  auto read_block(std::uint8_t reg) const {
+    return ::read_block(handle, reg);
+  }
+
+
+  void write_byte(std::uint8_t reg, std::uint8_t value) {
+    ::write_byte(handle, reg, value);
+  }
+
+  void send_command(std::uint8_t value) {
+    ::send_command(handle, value);
+  }
+};
+
+struct ds1307_rtc : i2c_device
+{
+  static constexpr int ds1307_rtc_address = 0x68;
+
+  ds1307_rtc(const int adapter) : i2c_device{adapter, ds1307_rtc_address}
+  {
+  }
+
+  std::array<std::uint8_t, 32> buffer{};
+
+  void sync_buffer() {
+    for(std::uint8_t offset = 0; offset < 10; ++offset) {
+      buffer[offset] = read_byte(offset);
+    }
+    //buffer = read_block(0x00).second;
+  }
+
+  [[nodiscard]] constexpr std::uint8_t get_buffered_byte(std::size_t offset) const noexcept {
+    return buffer[offset];
+  }
+
+
+  [[nodiscard]] constexpr static auto time_field(const std::uint8_t input) noexcept {
+      return (0b1111 & input) + ((input >> 4) & 0b1111) * 10;
+  };
+
+  [[nodiscard]] int seconds() const {
+    return time_field(static_cast<std::uint8_t>(0b0111'1111 & get_buffered_byte(0x00)));
+  }
+
+  [[nodiscard]] int minutes() const {
+    return time_field(get_buffered_byte(0x01));
+  }
+
+  [[nodiscard]] int hours() const {
+    return time_field(static_cast<std::uint8_t>(0b111111 & get_buffered_byte(0x02)));
+  }
+  
+  [[nodiscard]] int day_of_week() const {
+    return get_buffered_byte(0x03);
+  }
+
+  [[nodiscard]] int day_of_month() const {
+    return time_field(get_buffered_byte(0x04));
+  }
+
+  [[nodiscard]] int month() const {
+    return time_field(get_buffered_byte(0x05));
+  }
+
+  [[nodiscard]] int year() const {
+    return time_field(get_buffered_byte(0x06)) + 2000;
+  }
+
+
+
+  std::chrono::system_clock::time_point current_time() const 
+  {
+    std::tm time;
+    time.tm_sec = seconds();
+    time.tm_min = minutes();
+    time.tm_hour = hours();
+    time.tm_mday = day_of_month();
+    time.tm_mon = month() - 1;
+    time.tm_year = year() - 1970;
+    time.tm_wday = day_of_week() - 1;
+
+    return std::chrono::system_clock::from_time_t(std::mktime(&time));
+  }
+
+
+  template<std::size_t Offset=0, typename DataType>
+    void write_object(const DataType &data)
+    {
+      static_assert(sizeof(DataType)+Offset <= 56);
+      static_assert(std::is_trivial_v<DataType>);
+
+      const auto *ptr = reinterpret_cast<const std::uint8_t *>(&data);
+
+      constexpr auto start = 0x08;
+
+      for (std::size_t i = 0; i < sizeof(DataType); ++i) {
+        write_byte(static_cast<std::uint8_t>(start + Offset + i), *std::next(ptr, static_cast<std::ptrdiff_t>(i)));
+      }
+    }
+
+
+  template<std::size_t Offset=0, typename DataType>
+    DataType read_object()
+    {
+      static_assert(sizeof(DataType)+Offset <= 56);
+      static_assert(std::is_trivial_v<DataType>);
+
+      DataType data;
+      auto *ptr = reinterpret_cast<std::uint8_t *>(&data);
+
+      constexpr auto start = 0x08;
+
+      for (std::size_t i = 0; i < sizeof(DataType); ++i) {
+        *std::next(ptr, static_cast<std::ptrdiff_t>(i)) = read_byte(static_cast<std::uint8_t>(start + i + Offset));
+      }
+
+      return data;
+    }
+};
+
 
 int main(/*int argc, const char **argv*/)
 {
@@ -185,40 +335,25 @@ int main(/*int argc, const char **argv*/)
   //Use the default logger (stdout, multi-threaded, colored)
   spdlog::info("Starting i2c Experiments");
 
+  ds1307_rtc real_time_clock(1);
 
-  /*
-     Now, you have to decide which adapter you want to access. You should
-     inspect /sys/class/i2c-dev/ or run "i2cdetect -l" to decide this.
-     Adapter numbers are assigned somewhat dynamically, so you can not
-     assume much about them. They can even change from one boot to the next.
+  const std::array<char, 5> data{'H', 'e', 'l', 'l', 'o'};
+  real_time_clock.write_object<0>(data);
 
-     Next thing, open the device rtc, as follows:
-     */
-  constexpr int ds1307_rtc_address = 0x68;
+  fmt::print("Pre sync:  Current Time: {:02}:{:02}:{:02}\n", real_time_clock.hours(), real_time_clock.minutes(), real_time_clock.seconds());
+  real_time_clock.sync_buffer();
+  fmt::print("Post sync: Current Time: {:02}:{:02}:{:02}\n", real_time_clock.hours(), real_time_clock.minutes(), real_time_clock.seconds());
 
-  auto rtc = open_i2c_device(ds1307_rtc_address);
+//  fmt::print("{}", real_time_clock.current_time());
 
-  //  Well, you are all set up now. You can now use SMBus commands or plain
-  //    I2C to communicate with your device. SMBus commands are preferred if
-  //   the device supports them. Both are illustrated below.
+  
+  const auto read_data = real_time_clock.read_object<0, std::array<char, 5>>();
+  
+  for (const auto c : read_data) {
+    fmt::print("Read: '{}'\n", c);
+  }
 
-  auto time_field = [](const std::uint8_t input) {
-    return (0b1111 & input) + ((input >> 4) & 0b111) * 10;
-  };
-
-  // force 24 mode, putting in the same hour as was just read.
-  //
-  // let's really hope that we don't do this during a race for hours rolling over
-  //
-  // write_byte(rtc, 0x02, static_cast<std::uint8_t>(0b0011'1111 & read_byte(rtc, 0x02)));
-  const auto seconds = read_byte(rtc, 0x00);
-  const auto minutes = read_byte(rtc, 0x01);
-  const auto hours = 0b111111 & read_byte(rtc, 0x02);
-
-  fmt::print("{:02}:{:02}:{:02}\n", time_field(hours), time_field(minutes), time_field(seconds));
-
-
-  auto oled = open_i2c_device(0x3c);
+  auto oled = open_i2c_device(1, 0x3c);
   init_ssd1306(oled);
 
 
