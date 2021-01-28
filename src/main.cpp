@@ -59,20 +59,50 @@ auto read_byte(int device, std::uint8_t reg) -> std::uint8_t {
   return static_cast<std::uint8_t>(res);
 }
 
+auto read_byte(int device) -> std::uint8_t {
+  const auto res = i2c_smbus_read_byte(device);
+  if (res < 0) {
+    spdlog::error("Error reading byte of data from (err result: {})", res);
+  }
+  return static_cast<std::uint8_t>(res);
+}
+
 auto read_block(int device, std::uint8_t reg) -> std::pair<int, std::array<std::uint8_t, 32>> {
-  std::pair<int, std::array<std::uint8_t, 32>> result;
+  std::pair<int, std::array<std::uint8_t, 32>> result{};
   result.first = i2c_smbus_read_block_data(device, reg, result.second.data());
   if (result.first < 0) {
     spdlog::error("Error reading block of data from {} (err result: {})", reg, result.first);
+    spdlog::error("Error description: '{}'", strerror(errno));
   }
   return result;
 }
 
+template<typename Iter>
+void read_block_1_byte_at_a_time(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+{
+  spdlog::trace("Reading {} bytes from {:02x} starting at {:02x}", std::distance(buffer_begin, buffer_end), device, starting_address);
+
+  for (auto address = starting_address; buffer_begin != buffer_end; ++address, ++buffer_begin)
+  {
+    *buffer_begin = read_byte(device, address);
+  }
+}
 
 void write_byte(int device, std::uint8_t reg, std::uint8_t value) {
   const auto res = i2c_smbus_write_byte_data(device, reg, value);
   if (res < 0) {
     spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
+  }
+}
+
+template<typename Iter>
+void write_block_1_byte_at_a_time(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+{
+  spdlog::trace("Writing {} bytes from {:02x} starting at {:02x}", std::distance(buffer_begin, buffer_end), device, starting_address);
+
+  for (auto address = starting_address; buffer_begin != buffer_end; ++address, ++buffer_begin)
+  {
+    write_byte(device, address, *buffer_begin);
   }
 }
 
@@ -177,6 +207,13 @@ int open_i2c_device(const int adapter_nr, const int deviceid)
   return filehandle;
 }
 
+enum struct Block_Mode {
+  one_byte_at_a_time,
+  smbus_block_protocol,
+  i2c_multi_byte
+};
+
+template<Block_Mode read_mode>
 struct i2c_device
 {
   int handle{};
@@ -194,12 +231,50 @@ struct i2c_device
   i2c_device(const i2c_device &) = delete;
   i2c_device(i2c_device &&) = delete;
 
-  auto read_byte(std::uint8_t reg) const -> std::uint8_t {
+  [[nodiscard]] auto read_byte(std::uint8_t reg) const -> std::uint8_t {
     return ::read_byte(handle, reg);
   }
 
-  auto read_block(std::uint8_t reg) const {
+  [[nodiscard]] auto read_block(std::uint8_t reg) const {
     return ::read_block(handle, reg);
+  }
+ 
+  void read_block(const std::uint8_t starting_address, auto begin_iterator, auto end_iterator)
+  {
+    switch (read_mode) {
+      case Block_Mode::one_byte_at_a_time:
+        read_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
+        return;
+      case Block_Mode::smbus_block_protocol:
+        {
+        spdlog::error("Read block data is not fully implemented (for data>32bytes) and might overwrite the end of your buffer, don't use it");
+        const auto result = ::read_block(handle, starting_address);
+        std::copy(result.second.begin(), result.second.end(), begin_iterator);
+        return;
+        }
+      case Block_Mode::i2c_multi_byte:
+        spdlog::warn("i2c multi byte read not implemented, falling back to 1 byte at a time");
+        read_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
+        return;
+    }
+  }
+
+  void write_block(const std::uint8_t starting_address, auto begin_iterator, auto end_iterator)
+  {
+    switch (read_mode) {
+      case Block_Mode::one_byte_at_a_time:
+        write_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
+        return;
+      case Block_Mode::smbus_block_protocol:
+        {
+        spdlog::error("smbus Write block data is not implemented");
+        return;
+        }
+      case Block_Mode::i2c_multi_byte:
+        spdlog::warn("i2c multi byte read not implemented, falling back to 1 byte at a time");
+        write_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
+        return;
+    }
   }
 
 
@@ -212,7 +287,7 @@ struct i2c_device
   }
 };
 
-struct ds1307_rtc : i2c_device
+struct ds1307_rtc : i2c_device<Block_Mode::i2c_multi_byte>
 {
   static constexpr int ds1307_rtc_address = 0x68;
 
@@ -220,13 +295,10 @@ struct ds1307_rtc : i2c_device
   {
   }
 
-  std::array<std::uint8_t, 32> buffer{};
+  std::array<std::uint8_t, 8> buffer{};
 
   void sync_buffer() {
-    for(std::uint8_t offset = 0; offset < 10; ++offset) {
-      buffer[offset] = read_byte(offset);
-    }
-    //buffer = read_block(0x00).second;
+    read_block(0, begin(buffer), end(buffer));
   }
 
   [[nodiscard]] constexpr std::uint8_t get_buffered_byte(std::size_t offset) const noexcept {
@@ -268,8 +340,10 @@ struct ds1307_rtc : i2c_device
 
 
 
-  std::chrono::system_clock::time_point current_time() const 
+  std::chrono::system_clock::time_point current_time()
   {
+    sync_buffer();
+
     std::tm time;
     time.tm_sec = seconds();
     time.tm_min = minutes();
@@ -290,12 +364,8 @@ struct ds1307_rtc : i2c_device
       static_assert(std::is_trivial_v<DataType>);
 
       const auto *ptr = reinterpret_cast<const std::uint8_t *>(&data);
-
       constexpr auto start = 0x08;
-
-      for (std::size_t i = 0; i < sizeof(DataType); ++i) {
-        write_byte(static_cast<std::uint8_t>(start + Offset + i), *std::next(ptr, static_cast<std::ptrdiff_t>(i)));
-      }
+      write_block(start, ptr, std::next(ptr, sizeof(DataType)));
     }
 
 
@@ -310,9 +380,7 @@ struct ds1307_rtc : i2c_device
 
       constexpr auto start = 0x08;
 
-      for (std::size_t i = 0; i < sizeof(DataType); ++i) {
-        *std::next(ptr, static_cast<std::ptrdiff_t>(i)) = read_byte(static_cast<std::uint8_t>(start + i + Offset));
-      }
+      read_block(start, ptr, std::next(ptr, sizeof(DataType)));
 
       return data;
     }
@@ -334,10 +402,10 @@ int main(/*int argc, const char **argv*/)
 
   //Use the default logger (stdout, multi-threaded, colored)
   spdlog::info("Starting i2c Experiments");
-
+  spdlog::set_level(spdlog::level::trace);
   ds1307_rtc real_time_clock(1);
 
-  const std::array<char, 5> data{'H', 'e', 'l', 'l', 'o'};
+  const std::array<char, 5> data{'J', 'E', 'l', 'l', 'O'};
   real_time_clock.write_object<0>(data);
 
   fmt::print("Pre sync:  Current Time: {:02}:{:02}:{:02}\n", real_time_clock.hours(), real_time_clock.minutes(), real_time_clock.seconds());
