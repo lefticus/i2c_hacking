@@ -33,7 +33,7 @@ extern "C" {
 #include <fmt/chrono.h>
 
 static constexpr auto USAGE =
-R"(Naval Fate.
+  R"(Naval Fate.
 
     Usage:
           naval_fate ship new <name>...
@@ -51,70 +51,134 @@ R"(Naval Fate.
 )";
 
 
-auto read_byte(int device, std::uint8_t reg) -> std::uint8_t {
-  const auto res = i2c_smbus_read_byte_data(device, reg);
-  if (res < 0) {
-    spdlog::error("Error reading byte of data from {} (err result: {})", reg, res);
-  }
-  return static_cast<std::uint8_t>(res);
-}
-
-auto read_byte(int device) -> std::uint8_t {
-  const auto res = i2c_smbus_read_byte(device);
-  if (res < 0) {
-    spdlog::error("Error reading byte of data from (err result: {})", res);
-  }
-  return static_cast<std::uint8_t>(res);
-}
-
-auto read_block(int device, std::uint8_t reg) -> std::pair<int, std::array<std::uint8_t, 32>> {
-  std::pair<int, std::array<std::uint8_t, 32>> result{};
-  result.first = i2c_smbus_read_block_data(device, reg, result.second.data());
-  if (result.first < 0) {
-    spdlog::error("Error reading block of data from {} (err result: {})", reg, result.first);
-    spdlog::error("Error description: '{}'", strerror(errno));
-  }
-  return result;
-}
-
-template<typename Iter>
-void read_block_1_byte_at_a_time(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+struct Linux_i2c
 {
-  spdlog::trace("Reading {} bytes from {:02x} starting at {:02x}", std::distance(buffer_begin, buffer_end), device, starting_address);
+  using handle_type = int;
 
-  for (auto address = starting_address; buffer_begin != buffer_end; ++address, ++buffer_begin)
+  void close(int handle)
   {
-    *buffer_begin = read_byte(device, address);
+    ::close(handle);
   }
-}
 
-void write_byte(int device, std::uint8_t reg, std::uint8_t value) {
-  const auto res = i2c_smbus_write_byte_data(device, reg, value);
-  if (res < 0) {
-    spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
-  }
-}
-
-template<typename Iter>
-void write_block_1_byte_at_a_time(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
-{
-  spdlog::trace("Writing {} bytes from {:02x} starting at {:02x}", std::distance(buffer_begin, buffer_end), device, starting_address);
-
-  for (auto address = starting_address; buffer_begin != buffer_end; ++address, ++buffer_begin)
+  int open_i2c_device(const int adapter_nr, const int deviceid)
   {
-    write_byte(device, address, *buffer_begin);
+    const auto filehandle = open(fmt::format("/dev/i2c-{}", adapter_nr).c_str(), O_RDWR);
+    if (filehandle < 0) {
+      /* ERROR HANDLING; you can check errno to see what went wrong */
+      spdlog::error("Unable to open i2c-{} device for R/W", adapter_nr);
+      exit(1);
+    }
+
+    if (ioctl(filehandle, I2C_SLAVE, deviceid) < 0) {
+      /* ERROR HANDLING; you can check errno to see what went wrong */
+      spdlog::error("Unable to set I2C_SLAVE addr to {}", deviceid);
+      exit(1);
+    }
+
+    return filehandle;
   }
-}
 
-void send_command(int device, std::uint8_t value) {
-  const auto res = i2c_smbus_write_byte_data(device, 0, value);
-  if (res < 0) {
-    spdlog::error("Error writing command data '{}' (err result: {})", value, res);
+  template<typename Iter>
+  void smbus_read_block(int device, std::uint8_t address, Iter buffer_begin, Iter buffer_end)
+  {
+    spdlog::warn("Read block data is not implemented, falling back to 1 byte at a time");
+    read_block_1_byte_at_a_time(device, address, buffer_begin, buffer_end);
   }
-}
 
 
-constexpr auto SSD1306_I2C_ADDRESS = 0x3C;    // 011110+SA0+RW - 0x3C or 0x3D
+  auto read_byte(int device, std::uint8_t reg) -> std::uint8_t
+  {
+    const auto res = i2c_smbus_read_byte_data(device, reg);
+    if (res < 0) {
+      spdlog::error("Error reading byte of data from {} (err result: {})", reg, res);
+    }
+    return static_cast<std::uint8_t>(res);
+  }
+
+  auto read_byte(int device) -> std::uint8_t
+  {
+    const auto res = i2c_smbus_read_byte(device);
+    if (res < 0) {
+      spdlog::error("Error reading byte of data from (err result: {})", res);
+    }
+    return static_cast<std::uint8_t>(res);
+  }
+
+  template<typename Iter>
+  void i2c_read_block(int device, std::uint8_t address, Iter buffer_begin, Iter buffer_end)
+  {
+    const auto bytes_to_read = std::distance(buffer_begin, buffer_end);
+    if (bytes_to_read > I2C_SMBUS_BLOCK_MAX) {
+      spdlog::error("Error, cannot even try to read more than 255 bytes");
+    }
+    auto result = i2c_smbus_read_i2c_block_data(device, address, static_cast<std::uint8_t>(std::min(bytes_to_read, I2C_SMBUS_BLOCK_MAX)), &(*buffer_begin));
+    if (result < 0) {
+      spdlog::error("Error reading block of data from {} (err result: {})", address, result);
+      spdlog::error("Error description: '{}'", strerror(errno));
+    }
+  }
+
+
+  template<typename Iter>
+  void read_block_1_byte_at_a_time(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+  {
+    spdlog::trace("Reading {} bytes from {:02x} starting at {:02x}", std::distance(buffer_begin, buffer_end), device, starting_address);
+
+    for (auto address = starting_address; buffer_begin != buffer_end; ++address, ++buffer_begin) {
+      *buffer_begin = read_byte(device, address);
+    }
+  }
+
+  void write_byte(int device, std::uint8_t reg, std::uint8_t value)
+  {
+    const auto res = i2c_smbus_write_byte_data(device, reg, value);
+    if (res < 0) {
+      spdlog::error("Error writing byte of data reg {} (err result: {})", reg, res);
+    }
+  }
+
+  template<typename Iter>
+  void write_block_1_byte_at_a_time(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+  {
+    spdlog::trace("Writing {} bytes from {:02x} starting at {:02x}", std::distance(buffer_begin, buffer_end), device, starting_address);
+
+    for (auto address = starting_address; buffer_begin != buffer_end; ++address, ++buffer_begin) {
+      write_byte(device, address, *buffer_begin);
+    }
+  }
+
+  template<typename Iter>
+  void i2c_write_block(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+  {
+    const auto bytes_to_write = std::distance(buffer_begin, buffer_end);
+    if (bytes_to_write > I2C_SMBUS_BLOCK_MAX) {
+      spdlog::error("Error, cannot even try to write more than {} bytes, attempted {}", I2C_SMBUS_BLOCK_MAX, bytes_to_write);
+    }
+
+    spdlog::trace("Writing {} bytes from {:02x} starting at {:02x}", bytes_to_write, device, starting_address);
+
+    i2c_smbus_write_i2c_block_data(device, starting_address, static_cast<std::uint8_t>(std::min(bytes_to_write, I2C_SMBUS_BLOCK_MAX)), &(*buffer_begin));
+  }
+
+  template<typename Iter>
+  void smbus_write_block(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
+  {
+    spdlog::warn("smbus write block not implemented, falling back to 1 byte at a time");
+    write_block_1_byte_at_a_time(device, starting_address, buffer_begin, buffer_end);
+  }
+
+
+  void send_command(int device, std::uint8_t value)
+  {
+    const auto res = i2c_smbus_write_byte_data(device, 0, value);
+    if (res < 0) {
+      spdlog::error("Error writing command data '{}' (err result: {})", value, res);
+    }
+  }
+};
+
+
+//constexpr auto SSD1306_I2C_ADDRESS = 0x3C;// 011110+SA0+RW - 0x3C or 0x3D
 constexpr auto SSD1306_SETCONTRAST = 0x81;
 constexpr auto SSD1306_DISPLAYALLON_RESUME = 0xA4;
 constexpr auto SSD1306_DISPLAYALLON = 0xA5;
@@ -149,63 +213,8 @@ constexpr auto SSD1306_LEFT_HORIZONTAL_SCROLL = 0x27;
 constexpr auto SSD1306_VERTICAL_AND_RIGHT_HORIZONTAL_SCROLL = 0x29;
 constexpr auto SSD1306_VERTICAL_AND_LEFT_HORIZONTAL_SCROLL = 0x2A;
 
-void init_ssd1306(int device)
-{
-  // 128x32 pixel specific initialization.
-  send_command(device, SSD1306_DISPLAYOFF);                    // 0xAE
-  send_command(device, SSD1306_SETDISPLAYCLOCKDIV);            // 0xD5
-  send_command(device, 0x80);                                  // the suggested ratio 0x80
-  send_command(device, SSD1306_SETMULTIPLEX);                  // 0xA8
-  send_command(device, 0x1F);
-  send_command(device, SSD1306_SETDISPLAYOFFSET);              // 0xD3
-  send_command(device, 0x0);                                   // no offset
-  send_command(device, SSD1306_SETSTARTLINE | 0x0);            // line //0
-  send_command(device, SSD1306_CHARGEPUMP);                    // 0x8D
-  //if self._vccstate == SSD1306_EXTERNALVCC:
-  //    send_command(device, 0x10);
-  //else:
-  send_command(device, 0x14);
-  send_command(device, SSD1306_MEMORYMODE);                    // 0x20
-  send_command(device, 0x00);                                  // 0x0 act like ks0108
-  send_command(device, SSD1306_SEGREMAP | 0x1);
-  send_command(device, SSD1306_COMSCANDEC);
-  send_command(device, SSD1306_SETCOMPINS);                    // 0xDA
-  send_command(device, 0x02);
-  send_command(device, SSD1306_SETCONTRAST);                   // 0x81
-  send_command(device, 0x8F);
-  send_command(device, SSD1306_SETPRECHARGE);                  // 0xd9
-  //if self._vccstate == SSD1306_EXTERNALVCC:
-  //    send_command(device, 0x22);
-  //else:
-  send_command(device, 0xF1);
-  send_command(device, SSD1306_SETVCOMDETECT);                 // 0xDB
-  send_command(device, 0x40);
-  send_command(device, SSD1306_DISPLAYALLON_RESUME);           // 0xA4
-  send_command(device, SSD1306_NORMALDISPLAY);                 // 0xA6
-  send_command(device, SSD1306_DISPLAYON);                    // 0xAE
-  send_command(device, SSD1306_DISPLAYALLON);                    // 0xAE
-
-
-}
-
-
-int open_i2c_device(const int adapter_nr, const int deviceid)
-{
-  const auto filehandle = open(fmt::format("/dev/i2c-{}", adapter_nr).c_str(), O_RDWR);
-  if (filehandle < 0) {
-    /* ERROR HANDLING; you can check errno to see what went wrong */
-    spdlog::error("Unable to open i2c-{} device for R/W", adapter_nr);
-    exit(1);
-  }
-
-  if (ioctl(filehandle, I2C_SLAVE, deviceid) < 0) {
-    /* ERROR HANDLING; you can check errno to see what went wrong */
-    spdlog::error("Unable to set I2C_SLAVE addr to {}", deviceid);
-    exit(1);
-  }
-
-  return filehandle;
-}
+/*
+*/
 
 enum struct Block_Mode {
   one_byte_at_a_time,
@@ -213,17 +222,21 @@ enum struct Block_Mode {
   i2c_multi_byte
 };
 
-template<Block_Mode read_mode>
+template<typename Driver, Block_Mode read_mode>
 struct i2c_device
 {
-  int handle{};
+  Driver driver;
+
+  typename Driver::handle_type handle{};
+
   i2c_device(const int adapter_nr, const int deviceid)
-    : handle(open_i2c_device(adapter_nr, deviceid))
+    : handle(driver.open_i2c_device(adapter_nr, deviceid))
   {
   }
 
-  ~i2c_device() {
-    ::close(handle);
+  ~i2c_device()
+  {
+    driver.close(handle);
   }
 
   i2c_device &operator=(const i2c_device &) = delete;
@@ -231,113 +244,171 @@ struct i2c_device
   i2c_device(const i2c_device &) = delete;
   i2c_device(i2c_device &&) = delete;
 
-  [[nodiscard]] auto read_byte(std::uint8_t reg) const -> std::uint8_t {
-    return ::read_byte(handle, reg);
+  [[nodiscard]] auto read_byte(std::uint8_t reg) const -> std::uint8_t
+  {
+    return driver.read_byte(handle, reg);
   }
 
-  [[nodiscard]] auto read_block(std::uint8_t reg) const {
-    return ::read_block(handle, reg);
+  [[nodiscard]] auto read_block(std::uint8_t reg) const
+  {
+    return driver.read_block(handle, reg);
   }
- 
+
   void read_block(const std::uint8_t starting_address, auto begin_iterator, auto end_iterator)
   {
     switch (read_mode) {
-      case Block_Mode::one_byte_at_a_time:
-        read_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
-        return;
-      case Block_Mode::smbus_block_protocol:
-        {
-        spdlog::error("Read block data is not fully implemented (for data>32bytes) and might overwrite the end of your buffer, don't use it");
-        const auto result = ::read_block(handle, starting_address);
-        std::copy(result.second.begin(), result.second.end(), begin_iterator);
-        return;
-        }
-      case Block_Mode::i2c_multi_byte:
-        spdlog::warn("i2c multi byte read not implemented, falling back to 1 byte at a time");
-        read_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
-        return;
+    case Block_Mode::one_byte_at_a_time:
+      driver.read_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
+      return;
+    case Block_Mode::smbus_block_protocol:
+      driver.smbus_read_block(handle, starting_address, begin_iterator, end_iterator);
+      return;
+    case Block_Mode::i2c_multi_byte:
+      driver.i2c_read_block(handle, starting_address, begin_iterator, end_iterator);
+      return;
     }
   }
 
   void write_block(const std::uint8_t starting_address, auto begin_iterator, auto end_iterator)
   {
     switch (read_mode) {
-      case Block_Mode::one_byte_at_a_time:
-        write_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
-        return;
-      case Block_Mode::smbus_block_protocol:
-        {
-        spdlog::error("smbus Write block data is not implemented");
-        return;
-        }
-      case Block_Mode::i2c_multi_byte:
-        spdlog::warn("i2c multi byte read not implemented, falling back to 1 byte at a time");
-        write_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
-        return;
+    case Block_Mode::one_byte_at_a_time:
+      driver.write_block_1_byte_at_a_time(handle, starting_address, begin_iterator, end_iterator);
+      return;
+    case Block_Mode::smbus_block_protocol:
+      driver.smbus_write_block(handle, starting_address, begin_iterator, end_iterator);
+      return;
+    case Block_Mode::i2c_multi_byte:
+      driver.i2c_write_block(handle, starting_address, begin_iterator, end_iterator);
+      return;
     }
   }
 
 
-  void write_byte(std::uint8_t reg, std::uint8_t value) {
-    ::write_byte(handle, reg, value);
+  void write_byte(std::uint8_t reg, std::uint8_t value)
+  {
+    driver.write_byte(handle, reg, value);
   }
 
-  void send_command(std::uint8_t value) {
-    ::send_command(handle, value);
+  void send_command(std::uint8_t value)
+  {
+    driver.send_command(handle, value);
   }
 };
 
-struct ds1307_rtc : i2c_device<Block_Mode::i2c_multi_byte>
+template<typename Driver>
+struct ssd1306 : i2c_device<Driver, Block_Mode::i2c_multi_byte>
+{
+  enum struct Address {
+    SA0_LOW = 0x3c,
+    SA0_HIGH = 0x3d
+  };
+
+  ssd1306(const int adapter, const Address address)
+    : i2c_device<Driver, Block_Mode::i2c_multi_byte>{ adapter, static_cast<int>(address) }
+  {
+    // 128x32 pixel specific initialization.
+    this->send_command(SSD1306_DISPLAYOFF);                    // 0xAE
+    this->send_command(SSD1306_SETDISPLAYCLOCKDIV);            // 0xD5
+    this->send_command(0x80);                                  // the suggested ratio 0x80
+    this->send_command(SSD1306_SETMULTIPLEX);                  // 0xA8
+    this->send_command(0x1F);
+    this->send_command(SSD1306_SETDISPLAYOFFSET);              // 0xD3
+    this->send_command(0x0);                                   // no offset
+    this->send_command(SSD1306_SETSTARTLINE | 0x0);            // line //0
+    this->send_command(SSD1306_CHARGEPUMP);                    // 0x8D
+    //if self._vccstate == SSD1306_EXTERNALVCC:
+    //    this->send_command(0x10);
+    //else:
+    this->send_command(0x14);
+    this->send_command(SSD1306_MEMORYMODE);                    // 0x20
+    this->send_command(0x00);                                  // 0x0 act like ks0108
+    this->send_command(SSD1306_SEGREMAP | 0x1);
+    this->send_command(SSD1306_COMSCANDEC);
+    this->send_command(SSD1306_SETCOMPINS);                    // 0xDA
+    this->send_command(0x02);
+    this->send_command(SSD1306_SETCONTRAST);                   // 0x81
+    this->send_command(0x8F);
+    this->send_command(SSD1306_SETPRECHARGE);                  // 0xd9
+    //if self._vccstate == SSD1306_EXTERNALVCC:
+    //    this->send_command(0x22);
+    //else:
+    this->send_command(0xF1);
+    this->send_command(SSD1306_SETVCOMDETECT);                 // 0xDB
+    this->send_command(0x40);
+    this->send_command(SSD1306_DISPLAYALLON_RESUME);           // 0xA4
+    this->send_command(SSD1306_NORMALDISPLAY);                 // 0xA6
+    this->send_command(SSD1306_DISPLAYON);                    // 0xAE
+  }
+
+  void display_all_on()
+  {
+    this->send_command(SSD1306_DISPLAYALLON);                    // 0xAE
+  }
+
+};
+
+template<typename Driver>
+struct ds1307_rtc : i2c_device<Driver, Block_Mode::i2c_multi_byte>
 {
   static constexpr int ds1307_rtc_address = 0x68;
 
-  ds1307_rtc(const int adapter) : i2c_device{adapter, ds1307_rtc_address}
+  ds1307_rtc(const int adapter) : i2c_device<Driver, Block_Mode::i2c_multi_byte>{ adapter, ds1307_rtc_address }
   {
   }
 
   std::array<std::uint8_t, 8> buffer{};
 
-  void sync_buffer() {
-    read_block(0, begin(buffer), end(buffer));
+  void sync_buffer()
+  {
+    this->read_block(0, begin(buffer), end(buffer));
   }
 
-  [[nodiscard]] constexpr std::uint8_t get_buffered_byte(std::size_t offset) const noexcept {
+  [[nodiscard]] constexpr std::uint8_t get_buffered_byte(std::size_t offset) const noexcept
+  {
     return buffer[offset];
   }
 
 
-  [[nodiscard]] constexpr static auto time_field(const std::uint8_t input) noexcept {
-      return (0b1111 & input) + ((input >> 4) & 0b1111) * 10;
+  [[nodiscard]] constexpr static auto time_field(const std::uint8_t input) noexcept
+  {
+    return (0b1111 & input) + ((input >> 4) & 0b1111) * 10;
   };
 
-  [[nodiscard]] int seconds() const {
+  [[nodiscard]] int seconds() const
+  {
     return time_field(static_cast<std::uint8_t>(0b0111'1111 & get_buffered_byte(0x00)));
   }
 
-  [[nodiscard]] int minutes() const {
+  [[nodiscard]] int minutes() const
+  {
     return time_field(get_buffered_byte(0x01));
   }
 
-  [[nodiscard]] int hours() const {
+  [[nodiscard]] int hours() const
+  {
     return time_field(static_cast<std::uint8_t>(0b111111 & get_buffered_byte(0x02)));
   }
-  
-  [[nodiscard]] int day_of_week() const {
+
+  [[nodiscard]] int day_of_week() const
+  {
     return get_buffered_byte(0x03);
   }
 
-  [[nodiscard]] int day_of_month() const {
+  [[nodiscard]] int day_of_month() const
+  {
     return time_field(get_buffered_byte(0x04));
   }
 
-  [[nodiscard]] int month() const {
+  [[nodiscard]] int month() const
+  {
     return time_field(get_buffered_byte(0x05));
   }
 
-  [[nodiscard]] int year() const {
+  [[nodiscard]] int year() const
+  {
     return time_field(get_buffered_byte(0x06)) + 2000;
   }
-
 
 
   std::chrono::system_clock::time_point current_time()
@@ -357,33 +428,33 @@ struct ds1307_rtc : i2c_device<Block_Mode::i2c_multi_byte>
   }
 
 
-  template<std::size_t Offset=0, typename DataType>
-    void write_object(const DataType &data)
-    {
-      static_assert(sizeof(DataType)+Offset <= 56);
-      static_assert(std::is_trivial_v<DataType>);
+  template<std::size_t Offset = 0, typename DataType>
+  void write_object(const DataType &data)
+  {
+    static_assert(sizeof(DataType) + Offset <= 56);
+    static_assert(std::is_trivial_v<DataType>);
 
-      const auto *ptr = reinterpret_cast<const std::uint8_t *>(&data);
-      constexpr auto start = 0x08;
-      write_block(start, ptr, std::next(ptr, sizeof(DataType)));
-    }
+    const auto *ptr = reinterpret_cast<const std::uint8_t *>(&data);
+    constexpr auto start = 0x08;
+    this->write_block(start, ptr, std::next(ptr, sizeof(DataType)));
+  }
 
 
-  template<std::size_t Offset=0, typename DataType>
-    DataType read_object()
-    {
-      static_assert(sizeof(DataType)+Offset <= 56);
-      static_assert(std::is_trivial_v<DataType>);
+  template<std::size_t Offset = 0, typename DataType>
+  DataType read_object()
+  {
+    static_assert(sizeof(DataType) + Offset <= 56);
+    static_assert(std::is_trivial_v<DataType>);
 
-      DataType data;
-      auto *ptr = reinterpret_cast<std::uint8_t *>(&data);
+    DataType data;
+    auto *ptr = reinterpret_cast<std::uint8_t *>(&data);
 
-      constexpr auto start = 0x08;
+    constexpr auto start = 0x08;
 
-      read_block(start, ptr, std::next(ptr, sizeof(DataType)));
+    this->read_block(start, ptr, std::next(ptr, sizeof(DataType)));
 
-      return data;
-    }
+    return data;
+  }
 };
 
 
@@ -403,26 +474,25 @@ int main(/*int argc, const char **argv*/)
   //Use the default logger (stdout, multi-threaded, colored)
   spdlog::info("Starting i2c Experiments");
   spdlog::set_level(spdlog::level::trace);
-  ds1307_rtc real_time_clock(1);
+  ds1307_rtc<Linux_i2c> real_time_clock(1);
 
-  const std::array<char, 5> data{'J', 'E', 'l', 'l', 'O'};
+  const std::array<char, 5> data{ 'J', 'E', 'l', 'l', 'O' };
   real_time_clock.write_object<0>(data);
 
   fmt::print("Pre sync:  Current Time: {:02}:{:02}:{:02}\n", real_time_clock.hours(), real_time_clock.minutes(), real_time_clock.seconds());
   real_time_clock.sync_buffer();
   fmt::print("Post sync: Current Time: {:02}:{:02}:{:02}\n", real_time_clock.hours(), real_time_clock.minutes(), real_time_clock.seconds());
 
-//  fmt::print("{}", real_time_clock.current_time());
+  //  fmt::print("{}", real_time_clock.current_time());
 
-  
+
   const auto read_data = real_time_clock.read_object<0, std::array<char, 5>>();
-  
+
   for (const auto c : read_data) {
     fmt::print("Read: '{}'\n", c);
   }
 
-  auto oled = open_i2c_device(1, 0x3c);
-  init_ssd1306(oled);
-
+  ssd1306<Linux_i2c> display(1, ssd1306<Linux_i2c>::Address::SA0_LOW);
+//  display.display_all_on();
 
 }
