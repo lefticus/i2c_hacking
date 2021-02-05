@@ -151,9 +151,12 @@ struct Linux_i2c
   void i2c_write_block(int device, std::uint8_t starting_address, Iter buffer_begin, Iter buffer_end)
   {
     const auto bytes_to_write = std::distance(buffer_begin, buffer_end);
+
+
     if (bytes_to_write > I2C_SMBUS_BLOCK_MAX) {
       spdlog::error("Error, cannot even try to write more than {} bytes, attempted {}", I2C_SMBUS_BLOCK_MAX, bytes_to_write);
     }
+
 
     spdlog::trace("Writing {} bytes from {:02x} starting at {:02x}", bytes_to_write, device, starting_address);
 
@@ -304,8 +307,55 @@ struct ssd1306 : i2c_device<Driver, Block_Mode::i2c_multi_byte>
     SA0_HIGH = 0x3d
   };
 
-  ssd1306(const int adapter, const Address address)
-    : i2c_device<Driver, Block_Mode::i2c_multi_byte>{ adapter, static_cast<int>(address) }
+  int width;
+  int height;
+
+  int pages = height / 8;
+  int used_buffer = (width * height) / 8;
+
+  std::array<std::uint8_t, (128 * 64) / 8> buffer;
+
+  void clear()
+  {
+    buffer.fill(0);
+  }
+
+  void set_pixel(int x, int y, bool value)
+  {
+    // 0,0 = 0
+    // 0,1 = 0
+    // 0,8 = 128
+    // 1,9 = 129
+    const auto byte = x + ((y/8) * width);
+
+    buffer[byte] |= (std::uint8_t{value} << (y%8));
+  }
+
+  void push_buffer()
+  {
+
+    // """Write display buffer to physical display."""
+    this->send_command(SSD1306_COLUMNADDR);
+    this->send_command(0);              // Column start address. (0 = reset)
+    this->send_command(width-1);   // Column end address.
+    this->send_command(SSD1306_PAGEADDR);
+    this->send_command(0);              // Page start address. (0 = reset)
+    this->send_command(pages-1);  // Page end address.
+
+    auto buffer_begin = buffer.begin();
+    const auto buffer_end  = std::next(buffer.begin(), used_buffer);
+
+    while( buffer_begin != buffer_end )
+    {
+      const auto bytes_to_write = std::min(std::distance(buffer_begin, buffer_end), 16);
+      this->write_block(0x40, buffer_begin, std::next(buffer_begin, bytes_to_write));
+      std::advance(buffer_begin, bytes_to_write);
+    }
+  }
+
+  ssd1306(const int adapter, const Address address, const int width_, const int height_)
+    : i2c_device<Driver, Block_Mode::i2c_multi_byte>{ adapter, static_cast<int>(address) },
+      width{width_}, height{height_}
   {
     // 128x32 pixel specific initialization.
     this->send_command(SSD1306_DISPLAYOFF);                    // 0xAE
@@ -492,7 +542,15 @@ int main(/*int argc, const char **argv*/)
     fmt::print("Read: '{}'\n", c);
   }
 
-  ssd1306<Linux_i2c> display(1, ssd1306<Linux_i2c>::Address::SA0_LOW);
+  ssd1306<Linux_i2c> display(1, ssd1306<Linux_i2c>::Address::SA0_LOW, 128, 32);
+  display.clear();
+//  display.buffer[0] = 0x0F;
+//  display.buffer[128] = 0xF0;
+  display.set_pixel(0,0, true);
+  display.set_pixel(127,0, true);
+  display.set_pixel(127,31, true);
+  display.set_pixel(0,31, true);
+  display.push_buffer();
 //  display.display_all_on();
 
 }
