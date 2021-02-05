@@ -320,15 +320,21 @@ struct ssd1306 : i2c_device<Driver, Block_Mode::i2c_multi_byte>
     buffer.fill(0);
   }
 
+
+
   void set_pixel(int x, int y, bool value)
   {
     // 0,0 = 0
     // 0,1 = 0
     // 0,8 = 128
     // 1,9 = 129
+    //
     const auto byte = x + ((y/8) * width);
-
-    buffer[byte] |= (std::uint8_t{value} << (y%8));
+    if (value) {
+      buffer[byte] |= static_cast<std::uint8_t>(1 << (y%8));
+    } else {
+      buffer[byte] &= static_cast<std::uint8_t>(~(1 << (y%8)));
+    }
   }
 
   void push_buffer()
@@ -389,6 +395,23 @@ struct ssd1306 : i2c_device<Driver, Block_Mode::i2c_multi_byte>
     this->send_command(SSD1306_DISPLAYALLON_RESUME);           // 0xA4
     this->send_command(SSD1306_NORMALDISPLAY);                 // 0xA6
     this->send_command(SSD1306_DISPLAYON);                    // 0xAE
+  }
+
+  void write_glyph(const int x, const int y, auto glyph)
+  {
+    // this is terribly wrong if we break assumptions
+    std::size_t cur_col = 0;
+    const auto row_offset = y % 8;
+    for (const auto &byte : glyph) {
+      const auto start_byte = (y / 8) * width + x + cur_col;
+      if (row_offset != 0) {
+        buffer[start_byte] |= (byte << row_offset);
+        buffer[start_byte + width] |= (byte >> (7-row_offset));
+      } else {
+        buffer[start_byte] = byte;
+      }
+      ++cur_col;
+    }
   }
 
   void display_all_on()
@@ -508,6 +531,34 @@ struct ds1307_rtc : i2c_device<Driver, Block_Mode::i2c_multi_byte>
 };
 
 
+constexpr auto build_glyph(const std::array<std::uint8_t, 8> &data) {
+  std::array<std::uint8_t, 8> result{};
+
+  // transpose the data for happy ds1307 controller
+
+  const auto get_bit = [](const auto x, const auto y, const auto &input){
+    return ((input[y] >> (7-x)) & 1) == 1;
+  };
+
+  const auto set_bit = [](const auto x, const auto y, auto &input, bool value) {
+    if (value) {
+      input[y] |= (1 << (7-x));
+    } else {
+      input[y] &= ~(1 << (7-x));
+    }
+  };
+
+
+  for (std::size_t row = 0; row < 8; ++row) {
+    for (std::size_t col = 0; col < 8; ++col) {
+      set_bit(row, col, result, get_bit(col, 7-row, data));
+    }
+  }
+
+  return result;
+}
+
+
 int main(/*int argc, const char **argv*/)
 {
   /*
@@ -523,7 +574,7 @@ int main(/*int argc, const char **argv*/)
 
   //Use the default logger (stdout, multi-threaded, colored)
   spdlog::info("Starting i2c Experiments");
-  spdlog::set_level(spdlog::level::trace);
+  spdlog::set_level(spdlog::level::debug);
   ds1307_rtc<Linux_i2c> real_time_clock(1);
 
   const std::array<char, 5> data{ 'J', 'E', 'l', 'l', 'O' };
@@ -551,6 +602,77 @@ int main(/*int argc, const char **argv*/)
   display.set_pixel(127,31, true);
   display.set_pixel(0,31, true);
   display.push_buffer();
+
+
+  static constexpr auto H_glyph = build_glyph({
+      0b11000110,
+      0b11000110,
+      0b11000110,
+      0b11111110,
+      0b11000110,
+      0b11000110,
+      0b11000110,
+      0b00000000});
+
+  static constexpr auto e_glyph = build_glyph({
+      0b00000000,
+      0b00000000,
+      0b01111100,
+      0b11000110,
+      0b11111110,
+      0b11000000,
+      0b01111100,
+      0b00000000});
+
+  static constexpr auto l_glyph = build_glyph({
+      0b01100000,
+      0b01100000,
+      0b01100000,
+      0b01100000,
+      0b01100000,
+      0b01100000,
+      0b01100000,
+      0b00000000});
+
+
+  static constexpr auto o_glyph = build_glyph({
+      0b00000000,
+      0b00000000,
+      0b01111100,
+      0b11000110,
+      0b11000110,
+      0b11000110,
+      0b01111100,
+      0b00000000});
+
+
+  static constexpr std::array<std::uint8_t, 8> expected_glyph(
+      {
+      0b01111111,
+      0b01111111,
+      0b00001000,
+      0b00001000,
+      0b00001000,
+      0b01111111,
+      0b01111111,
+      0b00000000
+      });
+
+
+  for (int x = 0; x < 95; ++x) {
+    for (int y = 0; y < 30; ++y) {
+    display.clear();
+    display.write_glyph(x+0,y,H_glyph);
+    display.write_glyph(x+8,y,e_glyph);
+    display.write_glyph(x+16,y,l_glyph);
+    display.write_glyph(x+21,y,l_glyph);
+    display.write_glyph(x+26,y,o_glyph);
+    display.push_buffer();
+    }
+  }
+  assert(H_glyph == expected_glyph);
+
+
 //  display.display_all_on();
 
 }
